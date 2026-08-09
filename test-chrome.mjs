@@ -27,9 +27,10 @@ import assert from 'node:assert';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const FIXTURE_PORT = 8080;
-/** MAX_SIDE in sw.js. Restated, not imported — an independent oracle is the
- *  whole point of the crop predictions below. */
+/** MAX_SIDE and BAR in sw.js. Restated, not imported — an independent oracle is
+ *  the whole point of the crop predictions below. */
 const CAP = 1568;
+const BAR = 26;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
@@ -164,12 +165,14 @@ await send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageSess);
 // The overlay must actually be in the page. Without this the test cannot tell
 // "picker running" from "injection silently failed".
 // The z-index alone is not enough: the toast host raised at the end of a pick
-// carries the same one and would read as "still picking" for its 2s life. Only
-// the picker host also resets `all`, and the attribute is matched loosely
-// because the CSSOM reserialises `all:initial` as `all: initial`.
+// carries the same one and would read as "still picking" for its 2s life. The
+// insets tell them apart exactly — the picker host covers the viewport, the
+// toast sits in a corner. (Do NOT go back to matching the style attribute for
+// `all:initial`: Chrome expands that shorthand into ~7kB of longhands, so the
+// text never appears and any substring that does match does so by accident.)
 const picking = () => ev(
   `[...document.documentElement.children].some(n => n.tagName === 'DIV' && !n.id
-     && n.style.zIndex === '2147483647' && (n.getAttribute('style') || '').includes('initial'))`, pageSess);
+     && n.style.zIndex === '2147483647' && n.style.inset === '0px')`, pageSess);
 assert.equal(await picking(), true, 'picker overlay host is not in the page — injection failed silently');
 assert.equal(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
   'crosshair cursor missing — the picker did not start');
@@ -213,15 +216,25 @@ const expected = JSON.parse(await ev(
      const y = Math.max(0, Math.round(r.top * d) - pad);
      const w = Math.min(Math.round(innerWidth * d), Math.round(r.right * d) + pad) - x;
      const h = Math.min(Math.round(innerHeight * d), Math.round(r.bottom * d) + pad) - y;
-     // The 26px URL strip (BAR in sw.js) is inside the height budget, not on top.
-     const s = Math.min(1, ${CAP} / w, (${CAP} - 26) / h);
-     return JSON.stringify({w: Math.round(w * s), h: Math.round(h * s) + 26}); })()`, pageSess));
+     // The URL strip is inside the height budget, not on top of it.
+     const s = Math.min(1, ${CAP} / w, (${CAP} - ${BAR}) / h);
+     return JSON.stringify({w: Math.round(w * s), h: Math.round(h * s) + ${BAR}}); })()`, pageSess));
 
 // Poison the pasteboard first. clipboard.read() reads the real macOS pasteboard,
 // so without this every assertion below passes on whatever a PREVIOUS run left
-// there — an extension that writes nothing at all still reports success.
+// there — an extension that writes nothing at all still reports success, and the
+// final block below ends each run with a pick of this very element, so the decoy
+// is a pixel-perfect match for what the next run expects.
+//
+// The seed is asserted, not fired and forgotten: writeText needs a focused
+// document exactly as read() does, and a silently rejected seed puts the hole
+// straight back.
 const SENTINEL = `SENTINEL-${process.pid}`;
-await ev(`navigator.clipboard.writeText(${JSON.stringify(SENTINEL)})`, pageSess);
+const seeded = await ev(
+  `navigator.clipboard.writeText(${JSON.stringify(SENTINEL)}).then(() => 'ok').catch(e => 'FAILED: ' + e.message)`,
+  pageSess);
+assert.equal(seeded, 'ok',
+  `could not seed the sentinel: ${seeded} — every clipboard assertion below would run against a previous run's pasteboard`);
 
 for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
   await send('Input.dispatchMouseEvent',
@@ -311,36 +324,43 @@ for (const [sw_, sh] of [[4000, 2000], [2000, 4000]]) {
      const dv = new DataView(buf.buffer);
      return JSON.stringify({ w: dv.getUint32(16), h: dv.getUint32(20) });
    })()`, swSess));
-  const s = Math.min(1, CAP / sw_, (CAP - 26) / sh);
+  const s = Math.min(1, CAP / sw_, (CAP - BAR) / sh);
   assert.equal(got.w, Math.round(sw_ * s),
     `crop() made a ${sw_}×${sh} shot ${got.w}px wide, expected ${Math.round(sw_ * s)}`);
-  assert.equal(got.h, Math.round(sh * s) + 26,
-    `crop() made a ${sw_}×${sh} shot ${got.h}px tall, expected ${Math.round(sh * s) + 26}`);
+  assert.equal(got.h, Math.round(sh * s) + BAR,
+    `crop() made a ${sw_}×${sh} shot ${got.h}px tall, expected ${Math.round(sh * s) + BAR}`);
   assert.ok(Math.max(got.w, got.h) <= CAP,
     `crop() returned ${got.w}×${got.h} for a ${sw_}×${sh} shot — longest side is over the ${CAP} cap, ` +
     `so it gets resampled again downstream and the cap bought nothing`);
 }
-
-// The page must never see the selecting click.
-const leaked = await ev(`window.__pageSawClick === true`, pageSess);
-assert.notEqual(leaked, true, 'the page saw the selecting click — event swallowing is broken');
 
 // --- toggling inside a pick's teardown window ------------------------------
 // A pick arms teardown on a 600ms timer. Toggle off and on again inside that
 // window and the old timer fires against the NEW picker; if teardown does not
 // check it still owns the picker, it nulls the handle and orphans that picker's
 // swallow handlers on document — every click on the page eaten, no way to stop
-// it, reload the only escape. Last, because it deliberately leaves a pick and
-// two toggles in its wake. If the round trips overrun 600ms the window closes
-// and this stops proving anything, but it cannot fail against correct code.
-await ev(`startPicker(${tab})`, swSess);
+// it, reload the only escape. Late, because it deliberately leaves a pick and
+// two toggles in its wake.
+const toggle = async (why) => {
+  const r = await ev(`startPicker(${tab}).then(() => 'ok').catch(e => 'FAILED: ' + e.message)`, swSess);
+  assert.equal(r, 'ok', `startPicker threw while ${why}: ${r}`);
+};
+await toggle('restarting for the teardown-window check');
 await sleep(700);
+const t0 = Date.now();
 for (const type of ['mousePressed', 'mouseReleased']) {
   await send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 }, pageSess);
 }
-await ev(`startPicker(${tab})`, swSess); // inside the window: stops the picked one
-await ev(`startPicker(${tab})`, swSess); // inside the window: starts a fresh one
-await sleep(900);                        // let the first picker's stale timer fire
+await toggle('stopping the picked picker inside its teardown window');
+await toggle('starting a fresh picker inside that window');
+// Both toggles have to land inside the 600ms window or the race never happens
+// and the assert below passes without proving anything. Measured at ~14ms, so
+// this is a tripwire on a 40x slowdown, not a real timing dependency.
+const elapsed = Date.now() - t0;
+assert.ok(elapsed < 600,
+  `the two toggles took ${elapsed}ms, past the 600ms teardown window — this check proved nothing`);
+assert.equal(await picking(), true, 'the second toggle did not start a picker — nothing below is under test');
+await sleep(900); // let the first picker's stale timer fire
 await send('Input.dispatchKeyEvent',
   { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }, pageSess);
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
@@ -348,6 +368,11 @@ await sleep(300);
 assert.equal(await picking(), false,
   'Escape stopped working after a toggle inside a pick\'s teardown window — a stale teardown '
   + 'orphaned the live picker, and its click-swallowing handlers are now unremovable');
+
+// The page must never see a selecting click. Last, so it covers both picks —
+// run before the block above and the second one goes unchecked.
+const leaked = await ev(`window.__pageSawClick === true`, pageSess);
+assert.notEqual(leaked, true, 'the page saw the selecting click — event swallowing is broken');
 
 console.log(`PASS — clipboard carries ${JSON.stringify(flavours)}: ${clip.length} chars + ${shotNote}, click swallowed`);
 cleanup();
