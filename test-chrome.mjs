@@ -152,14 +152,44 @@ await sleep(1200);
 const pageSess = (await send('Target.attachToTarget', { targetId: page.result.targetId, flatten: true })).result.sessionId;
 await send('Runtime.enable', {}, pageSess);
 
+// navigator.clipboard.read() throws unless the document is focused, and a real
+// window is only focused while nothing else on the machine is frontmost. Without
+// this the clipboard assertions fail at random depending on what the developer
+// happened to click during the run.
+await send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageSess);
+
 // The overlay must actually be in the page. Without this the test cannot tell
 // "picker running" from "injection silently failed".
-assert.equal(await ev(
+const picking = () => ev(
   `[...document.documentElement.children].some(n => n.tagName === 'DIV' && !n.id
-     && (n.getAttribute('style') || '').includes('2147483647'))`, pageSess),
-  true, 'picker overlay host is not in the page — injection failed silently');
+     && (n.getAttribute('style') || '').includes('2147483647'))`, pageSess);
+assert.equal(await picking(), true, 'picker overlay host is not in the page — injection failed silently');
 assert.equal(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
   'crosshair cursor missing — the picker did not start');
+
+// --- the two ways out of selecting mode ------------------------------------
+// Both are easy to break without noticing: the picker still looks right, it just
+// never stops. What this CANNOT cover is picker.js taking focus at start: CDP
+// delivers the key to the page whatever has focus, so the real-world case —
+// focus parked on the toolbar button after the click — is untestable here.
+await send('Input.dispatchKeyEvent',
+  { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }, pageSess);
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
+await sleep(300);
+assert.equal(await picking(), false, 'Escape did not end selecting mode');
+assert.notEqual(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
+  'Escape left the crosshair cursor behind');
+
+// Then the toolbar icon, which toggles: on, then off, then on again for the
+// click below. The second call must stop the picker, not stack a second one.
+for (const [n, want] of [[1, true], [2, false], [3, true]]) {
+  const r = await ev(`startPicker(${tab}).then(() => 'ok').catch(e => 'FAILED: ' + e.message)`, swSess);
+  assert.equal(r, 'ok', `toolbar call ${n} threw: ${r}`);
+  await sleep(700);
+  assert.equal(await picking(), want,
+    `toolbar call ${n} should have left the picker ${want ? 'running' : 'off'} — the icon does not toggle`);
+}
+
 const box = JSON.parse(await ev(
   `(() => { const el = document.querySelector('[data-testid]'); const r = el.getBoundingClientRect();
      return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)}); })()`, pageSess));
@@ -174,7 +204,7 @@ const expected = JSON.parse(await ev(
      const y = Math.max(0, Math.round(r.top * d) - pad);
      const w = Math.min(Math.round(innerWidth * d), Math.round(r.right * d) + pad) - x;
      const h = Math.min(Math.round(innerHeight * d), Math.round(r.bottom * d) + pad) - y;
-     const s = Math.min(1, 1200 / Math.max(w, h));
+     const s = Math.min(1, 1568 / Math.max(w, h));
      // +26 for the URL strip burned along the bottom (BAR in sw.js).
      return JSON.stringify({w: Math.round(w * s), h: Math.round(h * s) + 26}); })()`, pageSess));
 
@@ -245,6 +275,28 @@ if (flavours.includes('image/png')) {
 } else {
   var shotNote = 'no image';
 }
+
+// --- the resolution cap ----------------------------------------------------
+// Every fixture element is far below the cap, so the click above exercises
+// scale === 1 and proves nothing about the downscale. Feed the worker's own
+// crop() an oversized shot instead: this is what fails if the cap is lowered
+// again or the resize path breaks.
+const CAP = 1568; // MAX_SIDE in sw.js — predicted independently, as above.
+const capped = JSON.parse(await ev(`(async () => {
+   const c = new OffscreenCanvas(4000, 2000);
+   const g = c.getContext('2d');
+   g.fillStyle = '#fff'; g.fillRect(0, 0, 4000, 2000);
+   const blob = await c.convertToBlob({ type: 'image/png' });
+   const url = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+   const out = await crop(url, { x: 0, y: 0, width: 4000, height: 2000 }, 1, 'https://example.com/wide');
+   const buf = Uint8Array.from(atob(out.split(',')[1]), (ch) => ch.charCodeAt(0));
+   const dv = new DataView(buf.buffer);
+   return JSON.stringify({ w: dv.getUint32(16), h: dv.getUint32(20) });
+ })()`, swSess));
+assert.equal(capped.w, CAP,
+  `crop() returned a ${capped.w}px-wide image for a 4000px shot — the cap should be ${CAP}`);
+assert.equal(capped.h, Math.round(2000 * (CAP / 4000)) + 26,
+  `crop() returned height ${capped.h} — aspect ratio or the 26px URL strip has drifted`);
 
 // The page must never see the selecting click.
 const leaked = await ev(`window.__pageSawClick === true`, pageSess);

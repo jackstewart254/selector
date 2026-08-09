@@ -16,6 +16,10 @@ const b64 = (buf) => {
 /** Height of the URL strip burned onto the bottom of every screenshot. */
 const BAR = 26;
 
+/** Longest side of the finished image. 1568 is where Claude's vision pipeline
+ *  stops downscaling, so anything above this is bytes the model throws away. */
+const MAX_SIDE = 1568;
+
 /** Shrink a URL until it fits `max` px: drop the scheme, then ellipsize the
  *  middle, keeping the host and the tail — those carry the most meaning. */
 function fitUrl(ctx, url, max) {
@@ -47,12 +51,15 @@ async function crop(dataUrl, rect, dpr, url = '') {
   const y = Math.max(0, Math.round(rect.y * dpr) - pad);
   const w = Math.max(1, Math.min(bmp.width, Math.round((rect.x + rect.width) * dpr) + pad) - x);
   const h = Math.max(1, Math.min(bmp.height, Math.round((rect.y + rect.height) * dpr) + pad) - y);
-  const scale = Math.min(1, 1200 / Math.max(w, h));
+  const scale = Math.min(1, MAX_SIDE / Math.max(w, h));
   const cw = Math.round(w * scale);
   const ch = Math.round(h * scale);
 
   const canvas = new OffscreenCanvas(cw, ch + BAR);
   const ctx = canvas.getContext('2d');
+  // Default smoothing is a cheap bilinear tap — it aliases text badly at the
+  // sub-half scales a retina capture hits. 'high' box-filters instead.
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, x, y, w, h, 0, 0, cw, ch);
   bmp.close();
 
@@ -137,6 +144,17 @@ function probe() {
 async function startPicker(tab) {
   const reason = blockedReason(tab && tab.url);
   if (!tab || reason) return fail(reason || 'no active tab');
+
+  // The icon toggles. Ask the tab first: a picker already running stops and
+  // reports true, and we are done. It throws when nothing is injected yet,
+  // which is the ordinary case and means "go ahead and start".
+  try {
+    if (await chrome.tabs.sendMessage(tab.id, { type: 'stop' })) {
+      chrome.action.setTitle({ tabId: tab.id, title: 'Selector — click, then pick an element' });
+      return;
+    }
+  } catch { /* no picker in this tab */ }
+
   try {
     const target = { tabId: tab.id };
     await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['vendor/element-source.global.js'] });
@@ -168,6 +186,9 @@ chrome.action.onClicked.addListener((tab) => startPicker(tab));
 // calls this directly. Exposing it keeps the test on the real entry point
 // rather than a copy of it that can silently drift.
 globalThis.startPicker = startPicker;
+// Same reason: the resolution cap only bites on shots larger than any fixture
+// element, so the test calls crop() directly rather than reimplementing it.
+globalThis.crop = crop;
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type !== 'picked') return false;

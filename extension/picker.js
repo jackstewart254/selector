@@ -18,7 +18,20 @@ const COLORS = {
   margin: 'rgba(246,178,107,.55)',
 };
 
-let active = false;
+// The running picker's teardown, or null when idle. Doubles as the "are we
+// picking?" flag, so the toolbar can stop a picker it did not start — the module
+// is imported once per page and this survives every later import().
+let stop = null;
+
+// The toolbar icon toggles: sw.js asks here first, and only injects if nothing
+// was already running. Replying true is what tells it not to start a second one.
+chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+  if (!msg || msg.type !== 'stop') return false;
+  const running = !!stop;
+  if (running) stop();
+  reply(running);
+  return false;
+});
 
 /** Position a ring: outer box at (x,y,w,h), thickness per side. */
 function place(el, x, y, w, h, side) {
@@ -150,8 +163,7 @@ function fillCard(card, el, rect, capture) {
 }
 
 export function start() {
-  if (active) return;
-  active = true;
+  if (stop) return;
 
   const host = document.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647';
@@ -189,6 +201,14 @@ export function start() {
   const prevCursor = document.documentElement.style.cursor;
   document.documentElement.style.cursor = 'crosshair';
 
+  // Clicking the toolbar icon leaves focus in the browser chrome, so the page
+  // document receives no keydown and Escape does nothing until you click into
+  // the page. Take focus onto the overlay host — invisible and pointer-events
+  // none, so this costs nothing but routes the keys here.
+  const prevFocus = document.activeElement;
+  host.tabIndex = -1;
+  host.focus({ preventScroll: true });
+
   let hovered = null;
   let picked = false;
 
@@ -198,11 +218,18 @@ export function start() {
   }
 
   function teardown() {
-    active = false;
+    if (!stop) return; // already torn down — Escape, then a toolbar click
+    stop = null;
     for (const t of MOUSE) document.removeEventListener(t, swallow, true);
     document.removeEventListener('pointermove', hover, true);
     document.removeEventListener('keydown', onKey, true);
     hide();
+    // Give focus back, so picking does not blur a form the user was filling in.
+    // Here and not in hide(), which also runs mid-pick — a restored focus ring
+    // would land in the screenshot.
+    if (prevFocus && prevFocus.isConnected && typeof prevFocus.focus === 'function') {
+      prevFocus.focus({ preventScroll: true });
+    }
   }
 
   function hover(e) {
@@ -277,6 +304,7 @@ export function start() {
   for (const t of MOUSE) document.addEventListener(t, swallow, true);
   document.addEventListener('pointermove', hover, true);
   document.addEventListener('keydown', onKey, true);
+  stop = teardown;
 }
 
 async function pick(el) {
