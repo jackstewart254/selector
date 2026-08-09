@@ -27,6 +27,9 @@ import assert from 'node:assert';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const FIXTURE_PORT = 8080;
+/** MAX_SIDE in sw.js. Restated, not imported — an independent oracle is the
+ *  whole point of the crop predictions below. */
+const CAP = 1568;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
@@ -160,9 +163,13 @@ await send('Emulation.setFocusEmulationEnabled', { enabled: true }, pageSess);
 
 // The overlay must actually be in the page. Without this the test cannot tell
 // "picker running" from "injection silently failed".
+// The z-index alone is not enough: the toast host raised at the end of a pick
+// carries the same one and would read as "still picking" for its 2s life. Only
+// the picker host also resets `all`, and the attribute is matched loosely
+// because the CSSOM reserialises `all:initial` as `all: initial`.
 const picking = () => ev(
   `[...document.documentElement.children].some(n => n.tagName === 'DIV' && !n.id
-     && (n.getAttribute('style') || '').includes('2147483647'))`, pageSess);
+     && n.style.zIndex === '2147483647' && (n.getAttribute('style') || '').includes('initial'))`, pageSess);
 assert.equal(await picking(), true, 'picker overlay host is not in the page — injection failed silently');
 assert.equal(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
   'crosshair cursor missing — the picker did not start');
@@ -177,7 +184,9 @@ await send('Input.dispatchKeyEvent',
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
 await sleep(300);
 assert.equal(await picking(), false, 'Escape did not end selecting mode');
-assert.notEqual(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
+// equal '', not notEqual 'crosshair' — the latter also passes when ev() returns
+// null on an evaluation error. prevCursor is '' on this fixture.
+assert.equal(await ev(`document.documentElement.style.cursor`, pageSess), '',
   'Escape left the crosshair cursor behind');
 
 // Then the toolbar icon, which toggles: on, then off, then on again for the
@@ -187,7 +196,7 @@ for (const [n, want] of [[1, true], [2, false], [3, true]]) {
   assert.equal(r, 'ok', `toolbar call ${n} threw: ${r}`);
   await sleep(700);
   assert.equal(await picking(), want,
-    `toolbar call ${n} should have left the picker ${want ? 'running' : 'off'} — the icon does not toggle`);
+    `toolbar call ${n}: picker ${want ? 'did not start' : 'did not stop'}`);
 }
 
 const box = JSON.parse(await ev(
@@ -204,9 +213,15 @@ const expected = JSON.parse(await ev(
      const y = Math.max(0, Math.round(r.top * d) - pad);
      const w = Math.min(Math.round(innerWidth * d), Math.round(r.right * d) + pad) - x;
      const h = Math.min(Math.round(innerHeight * d), Math.round(r.bottom * d) + pad) - y;
-     const s = Math.min(1, 1568 / Math.max(w, h));
-     // +26 for the URL strip burned along the bottom (BAR in sw.js).
+     // The 26px URL strip (BAR in sw.js) is inside the height budget, not on top.
+     const s = Math.min(1, ${CAP} / w, (${CAP} - 26) / h);
      return JSON.stringify({w: Math.round(w * s), h: Math.round(h * s) + 26}); })()`, pageSess));
+
+// Poison the pasteboard first. clipboard.read() reads the real macOS pasteboard,
+// so without this every assertion below passes on whatever a PREVIOUS run left
+// there — an extension that writes nothing at all still reports success.
+const SENTINEL = `SENTINEL-${process.pid}`;
+await ev(`navigator.clipboard.writeText(${JSON.stringify(SENTINEL)})`, pageSess);
 
 for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
   await send('Input.dispatchMouseEvent',
@@ -221,6 +236,8 @@ const flavours = JSON.parse(await ev(
      JSON.stringify(items.length ? items[0].types : [])).catch(e => JSON.stringify(['ERR:' + e.message]))`, pageSess));
 const clip = await ev(`navigator.clipboard.readText()`, pageSess);
 assert.ok(clip && typeof clip === 'string', `clipboard unreadable: ${clip}`);
+assert.notEqual(clip, SENTINEL,
+  'the pick wrote nothing — the clipboard still holds the sentinel this run put there');
 if (process.env.VERBOSE) console.log('--- clipboard ---\n' + clip + '\n--- end ---');
 
 // --- assertions ------------------------------------------------------------
@@ -279,28 +296,58 @@ if (flavours.includes('image/png')) {
 // --- the resolution cap ----------------------------------------------------
 // Every fixture element is far below the cap, so the click above exercises
 // scale === 1 and proves nothing about the downscale. Feed the worker's own
-// crop() an oversized shot instead: this is what fails if the cap is lowered
-// again or the resize path breaks.
-const CAP = 1568; // MAX_SIDE in sw.js — predicted independently, as above.
-const capped = JSON.parse(await ev(`(async () => {
-   const c = new OffscreenCanvas(4000, 2000);
-   const g = c.getContext('2d');
-   g.fillStyle = '#fff'; g.fillRect(0, 0, 4000, 2000);
-   const blob = await c.convertToBlob({ type: 'image/png' });
-   const url = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
-   const out = await crop(url, { x: 0, y: 0, width: 4000, height: 2000 }, 1, 'https://example.com/wide');
-   const buf = Uint8Array.from(atob(out.split(',')[1]), (ch) => ch.charCodeAt(0));
-   const dv = new DataView(buf.buffer);
-   return JSON.stringify({ w: dv.getUint32(16), h: dv.getUint32(20) });
- })()`, swSess));
-assert.equal(capped.w, CAP,
-  `crop() returned a ${capped.w}px-wide image for a 4000px shot — the cap should be ${CAP}`);
-assert.equal(capped.h, Math.round(2000 * (CAP / 4000)) + 26,
-  `crop() returned height ${capped.h} — aspect ratio or the 26px URL strip has drifted`);
+// crop() oversized shots instead. Both orientations: landscape alone passes
+// even with the height axis unclamped, which is how the URL strip spent a
+// commit pushing portrait shots to CAP + 26 and back over the threshold.
+for (const [sw_, sh] of [[4000, 2000], [2000, 4000]]) {
+  const got = JSON.parse(await ev(`(async () => {
+     const c = new OffscreenCanvas(${sw_}, ${sh});
+     const g = c.getContext('2d');
+     g.fillStyle = '#fff'; g.fillRect(0, 0, ${sw_}, ${sh});
+     const blob = await c.convertToBlob({ type: 'image/png' });
+     const url = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+     const out = await crop(url, { x: 0, y: 0, width: ${sw_}, height: ${sh} }, 1, 'https://example.com/wide');
+     const buf = Uint8Array.from(atob(out.split(',')[1]), (ch) => ch.charCodeAt(0));
+     const dv = new DataView(buf.buffer);
+     return JSON.stringify({ w: dv.getUint32(16), h: dv.getUint32(20) });
+   })()`, swSess));
+  const s = Math.min(1, CAP / sw_, (CAP - 26) / sh);
+  assert.equal(got.w, Math.round(sw_ * s),
+    `crop() made a ${sw_}×${sh} shot ${got.w}px wide, expected ${Math.round(sw_ * s)}`);
+  assert.equal(got.h, Math.round(sh * s) + 26,
+    `crop() made a ${sw_}×${sh} shot ${got.h}px tall, expected ${Math.round(sh * s) + 26}`);
+  assert.ok(Math.max(got.w, got.h) <= CAP,
+    `crop() returned ${got.w}×${got.h} for a ${sw_}×${sh} shot — longest side is over the ${CAP} cap, ` +
+    `so it gets resampled again downstream and the cap bought nothing`);
+}
 
 // The page must never see the selecting click.
 const leaked = await ev(`window.__pageSawClick === true`, pageSess);
 assert.notEqual(leaked, true, 'the page saw the selecting click — event swallowing is broken');
+
+// --- toggling inside a pick's teardown window ------------------------------
+// A pick arms teardown on a 600ms timer. Toggle off and on again inside that
+// window and the old timer fires against the NEW picker; if teardown does not
+// check it still owns the picker, it nulls the handle and orphans that picker's
+// swallow handlers on document — every click on the page eaten, no way to stop
+// it, reload the only escape. Last, because it deliberately leaves a pick and
+// two toggles in its wake. If the round trips overrun 600ms the window closes
+// and this stops proving anything, but it cannot fail against correct code.
+await ev(`startPicker(${tab})`, swSess);
+await sleep(700);
+for (const type of ['mousePressed', 'mouseReleased']) {
+  await send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 }, pageSess);
+}
+await ev(`startPicker(${tab})`, swSess); // inside the window: stops the picked one
+await ev(`startPicker(${tab})`, swSess); // inside the window: starts a fresh one
+await sleep(900);                        // let the first picker's stale timer fire
+await send('Input.dispatchKeyEvent',
+  { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }, pageSess);
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
+await sleep(300);
+assert.equal(await picking(), false,
+  'Escape stopped working after a toggle inside a pick\'s teardown window — a stale teardown '
+  + 'orphaned the live picker, and its click-swallowing handlers are now unremovable');
 
 console.log(`PASS — clipboard carries ${JSON.stringify(flavours)}: ${clip.length} chars + ${shotNote}, click swallowed`);
 cleanup();

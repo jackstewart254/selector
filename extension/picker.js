@@ -203,11 +203,15 @@ export function start() {
 
   // Clicking the toolbar icon leaves focus in the browser chrome, so the page
   // document receives no keydown and Escape does nothing until you click into
-  // the page. Take focus onto the overlay host — invisible and pointer-events
-  // none, so this costs nothing but routes the keys here.
-  const prevFocus = document.activeElement;
-  host.tabIndex = -1;
-  host.focus({ preventScroll: true });
+  // the page. Take focus onto the overlay host to route the keys here — but only
+  // when the page has nothing real focused. Stealing it fires focusout, and a
+  // combobox or popover that dismisses on focusout is usually the exact thing
+  // being picked.
+  const focused = document.activeElement;
+  if (!focused || focused === document.body || focused === document.documentElement) {
+    host.tabIndex = -1;
+    host.focus({ preventScroll: true });
+  }
 
   let hovered = null;
   let picked = false;
@@ -218,18 +222,20 @@ export function start() {
   }
 
   function teardown() {
-    if (!stop) return; // already torn down — Escape, then a toolbar click
+    // Identity, not truthiness. A pick arms this on a 600ms timer; stop the
+    // picker and start a fresh one inside that window and the old timer would
+    // otherwise tear the NEW picker's state down, orphaning its swallow handlers
+    // on document with no way left to remove them — a page dead to the mouse
+    // until reload.
+    if (stop !== teardown) return;
     stop = null;
     for (const t of MOUSE) document.removeEventListener(t, swallow, true);
     document.removeEventListener('pointermove', hover, true);
     document.removeEventListener('keydown', onKey, true);
     hide();
-    // Give focus back, so picking does not blur a form the user was filling in.
-    // Here and not in hide(), which also runs mid-pick — a restored focus ring
-    // would land in the screenshot.
-    if (prevFocus && prevFocus.isConnected && typeof prevFocus.focus === 'function') {
-      prevFocus.focus({ preventScroll: true });
-    }
+    // The worker owns the toolbar tooltip and cannot see this happen. Without
+    // it the icon keeps saying "Escape cancels" at a picker that already quit.
+    chrome.runtime.sendMessage({ type: 'idle' }).catch(() => {});
   }
 
   function hover(e) {
