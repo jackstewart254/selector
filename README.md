@@ -4,8 +4,6 @@
 <h1 align="center">Selector</h1>
 <p align="center">Click any element on a page. Paste it into an AI coding agent.</p>
 
----
-
 ## Why
 
 I didn't want to be landlocked to Claude Code Desktop just to use its element
