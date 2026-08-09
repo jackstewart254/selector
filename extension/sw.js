@@ -16,6 +16,10 @@ const b64 = (buf) => {
 /** Height of the URL strip burned onto the bottom of every screenshot. */
 const BAR = 26;
 
+/** Longest side of the finished image. 1568 is where Claude's vision pipeline
+ *  stops downscaling, so anything above this is bytes the model throws away. */
+const MAX_SIDE = 1568;
+
 /** Shrink a URL until it fits `max` px: drop the scheme, then ellipsize the
  *  middle, keeping the host and the tail — those carry the most meaning. */
 function fitUrl(ctx, url, max) {
@@ -35,10 +39,10 @@ function fitUrl(ctx, url, max) {
 }
 
 /**
- * Crop the visible-tab PNG to the element rect, 80px padding, longest side
- * <= 1200, then burn the page URL along the bottom. The strip matters: when the
- * image is the flavour that gets pasted, it is the ONLY thing carrying where it
- * came from — the text block goes nowhere.
+ * Crop the visible-tab PNG to the element rect, 80px padding, longest side of
+ * the FINISHED image <= MAX_SIDE, then burn the page URL along the bottom. The
+ * strip matters: when the image is the flavour that gets pasted, it is the ONLY
+ * thing carrying where it came from — the text block goes nowhere.
  */
 async function crop(dataUrl, rect, dpr, url = '') {
   const bmp = await createImageBitmap(await (await fetch(dataUrl)).blob());
@@ -47,12 +51,19 @@ async function crop(dataUrl, rect, dpr, url = '') {
   const y = Math.max(0, Math.round(rect.y * dpr) - pad);
   const w = Math.max(1, Math.min(bmp.width, Math.round((rect.x + rect.width) * dpr) + pad) - x);
   const h = Math.max(1, Math.min(bmp.height, Math.round((rect.y + rect.height) * dpr) + pad) - y);
-  const scale = Math.min(1, 1200 / Math.max(w, h));
+  // The strip is part of what ships, so it comes out of the height budget —
+  // clamping the crop alone lands a portrait shot at MAX_SIDE + BAR and puts it
+  // straight back over the threshold this cap exists to stay under.
+  const scale = Math.min(1, MAX_SIDE / w, (MAX_SIDE - BAR) / h);
   const cw = Math.round(w * scale);
   const ch = Math.round(h * scale);
 
   const canvas = new OffscreenCanvas(cw, ch + BAR);
   const ctx = canvas.getContext('2d');
+  // No imageSmoothingQuality here on purpose: measured on Chrome 151, drawImage
+  // downscaling a bitmap decoded from a PNG already box-filters (1px stripes at
+  // 0.39x come out flat grey), and 'high' is byte-for-byte identical to the
+  // default. createImageBitmap's resizeQuality:'high' is measurably worse.
   ctx.drawImage(bmp, x, y, w, h, 0, 0, cw, ch);
   bmp.close();
 
@@ -137,6 +148,15 @@ function probe() {
 async function startPicker(tab) {
   const reason = blockedReason(tab && tab.url);
   if (!tab || reason) return fail(reason || 'no active tab');
+
+  // The icon toggles. Ask the tab first: a picker already running stops and
+  // reports true, and we are done — its teardown sends the 'idle' that puts the
+  // tooltip back. It throws when nothing is injected yet, which is the ordinary
+  // case and means "go ahead and start".
+  try {
+    if (await chrome.tabs.sendMessage(tab.id, { type: 'stop' })) return;
+  } catch { /* no picker in this tab */ }
+
   try {
     const target = { tabId: tab.id };
     await chrome.scripting.executeScript({ target, world: 'MAIN', files: ['vendor/element-source.global.js'] });
@@ -168,8 +188,20 @@ chrome.action.onClicked.addListener((tab) => startPicker(tab));
 // calls this directly. Exposing it keeps the test on the real entry point
 // rather than a copy of it that can silently drift.
 globalThis.startPicker = startPicker;
+// Same reason: the resolution cap only bites on shots larger than any fixture
+// element, so the test calls crop() directly rather than reimplementing it.
+globalThis.crop = crop;
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  // Any way out of selecting mode — pick, Escape, or the toolbar — ends here, so
+  // the tooltip stops advertising a picker that is no longer running. Read from
+  // the manifest rather than restating the string it already holds.
+  if (msg.type === 'idle') {
+    if (sender.tab) {
+      chrome.action.setTitle({ tabId: sender.tab.id, title: chrome.runtime.getManifest().action.default_title });
+    }
+    return false;
+  }
   if (msg.type !== 'picked') return false;
   handlePick(msg, sender).then(reply, (e) => {
     badge('!', '#cf222e');
