@@ -1,4 +1,4 @@
-# element-selector — Chrome extension
+# Selector — Chrome extension
 
 Click a DOM element in Chrome, its context lands on your clipboard. Paste it
 wherever it needs to go. See `../SPEC.md` for the payload format.
@@ -79,7 +79,7 @@ Two details worth knowing before changing anything:
   expando properties, and expandos live on each world's own wrapper object. A
   content script in the isolated world simply cannot see `__reactFiber$`. The
   probe runs `element-source` in the page's world; the picker hands it the
-  element via a temporary `data-element-selector-target` attribute, because
+  element via a temporary `data-selector-target` attribute, because
   attributes are real DOM state and are shared across worlds.
 - **Why `import()` instead of `files:[…]`.** `chrome.scripting.executeScript`
   evaluates `files` as classic scripts, so a content script cannot `import`.
@@ -111,7 +111,7 @@ overlay, no crosshair, no error. Two causes, in order of likelihood:
    an explicit reload at `chrome://extensions` (the circular arrow on the card).
    Check the version on the card at `chrome://extensions`; if it does not match
    `manifest.json`, the reload did not take.
-2. **Site access is restricted.** `chrome://extensions` -> element-selector ->
+2. **Site access is restricted.** `chrome://extensions` -> Selector ->
    **Details** -> **Site access** must be **On all sites**. Chrome remembers a
    per-extension choice of "On click" / "On specific sites", and that choice
    survives a manifest change — so an extension first loaded with only

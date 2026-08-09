@@ -1,4 +1,4 @@
-# element-selector — spec
+# Selector — spec
 
 Click a DOM element in Chrome, its context lands on your clipboard. Paste it
 anywhere: a Claude Code CLI session, Desktop, a GitHub issue.

@@ -4,7 +4,7 @@
 // element to the service worker.
 import { buildPayload } from './payload.js';
 
-const MARKER = 'data-element-selector-target';
+const MARKER = 'data-selector-target';
 // Every mouse event a page might act on. Capture phase at document, all
 // cancelled — a link must not navigate just because you selected it.
 const MOUSE = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'auxclick', 'contextmenu'];
@@ -301,7 +301,7 @@ async function pick(el) {
     text: 'Copied — text only',
     fail: 'Copy failed — see console',
   }[how], how !== 'fail');
-  if (how === 'fail') console.warn('[element-selector] clipboard write failed; payload follows\n' + text);
+  if (how === 'fail') console.warn('[selector] clipboard write failed; payload follows\n' + text);
 }
 
 /**
@@ -332,7 +332,7 @@ async function copy(text, dataUrl) {
       return 'both';
     } catch (e) {
       // Insecure context, or the page denied it. Text is the important half.
-      console.warn('[element-selector] image copy failed, falling back to text', e);
+      console.warn('[selector] image copy failed, falling back to text', e);
     }
   }
   try {

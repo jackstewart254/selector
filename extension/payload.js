@@ -3,7 +3,7 @@
 // at module scope, and neither does vendor/finder.js.
 import { finder, className as finderClassName } from './vendor/finder.js';
 
-const MARKER = 'data-element-selector-target'; // picker's temporary main-world handoff attribute
+const MARKER = 'data-selector-target'; // picker's temporary main-world handoff attribute
 
 // ---------------------------------------------------------------- hardening
 

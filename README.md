@@ -1,4 +1,14 @@
-# element-selector
+<p align="center">
+  <img src="assets/logo-256.png" alt="Selector" width="128" height="128">
+</p>
+
+<h1 align="center">Selector</h1>
+
+<p align="center">
+  Click any element on a page. Paste it into an AI coding agent.
+</p>
+
+---
 
 A Chrome extension that turns any element on a page into something you can paste
 into an AI coding agent.
@@ -140,4 +150,4 @@ and the page URL added.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Logo and icons © Jack Stewart.

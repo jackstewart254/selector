@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Logo">
+  <title>Logo</title>
+  <rect width="512" height="512" rx="112" fill="#0795FF"/>
+  <g transform="translate(282.165,237.664) rotate(-20) scale(3.4) translate(-35,-53)">
+    <path d="M0 0 L0 92 L23 71 L39 106 L56 98 L41 64 L70 61 Z"
+          fill="#FFFFFF" stroke="#5A6472" stroke-width="1.9"
+          stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -121,7 +121,7 @@ function probe() {
     if (e.source !== window || !e.data || e.data.__elementSelector !== 'req') return;
     let component = '';
     try {
-      const el = document.querySelector('[data-element-selector-target]');
+      const el = document.querySelector('[data-selector-target]');
       const src = window.ElementSource;
       if (el && src) {
         const info = await src.resolveElementInfo(el);
@@ -158,8 +158,8 @@ async function startPicker(tab) {
  *  failure that happens before anything can be drawn on the page. */
 function fail(reason) {
   badge('!', '#cf222e');
-  chrome.action.setTitle({ title: `element-selector: ${reason}` });
-  console.warn('[element-selector]', reason);
+  chrome.action.setTitle({ title: `Selector: ${reason}` });
+  console.warn('[selector]', reason);
 }
 
 chrome.action.onClicked.addListener((tab) => startPicker(tab));
