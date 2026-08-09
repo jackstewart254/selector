@@ -203,12 +203,16 @@ export function start() {
 
   // Clicking the toolbar icon leaves focus in the browser chrome, so the page
   // document receives no keydown and Escape does nothing until you click into
-  // the page. Take focus onto the overlay host to route the keys here — but only
-  // when the page has nothing real focused. Stealing it fires focusout, and a
-  // combobox or popover that dismisses on focusout is usually the exact thing
-  // being picked.
-  const focused = document.activeElement;
-  if (!focused || focused === document.body || focused === document.documentElement) {
+  // the page. Take focus onto the overlay host to route the keys here.
+  //
+  // hasFocus(), not activeElement: Blink KEEPS activeElement when the web
+  // contents loses focus — measured on Chrome 151, a focused <input> is still
+  // activeElement after focus moves away — so gating on it means never firing
+  // for anyone who had a field focused, which is most of the reason to reach for
+  // the picker. And this is the exact condition: onKey listens at document
+  // capture, so any focused page element already delivers Escape. The steal is
+  // only ever needed when the document has no focus at all.
+  if (!document.hasFocus()) {
     host.tabIndex = -1;
     host.focus({ preventScroll: true });
   }
