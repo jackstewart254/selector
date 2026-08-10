@@ -11,6 +11,11 @@ selector — the whole app in front of you, chat in the middle, one view. Now I 
 a CLI agent beside my dev environment in my own browser, clicking straight on the
 elements I'm talking about. Much quicker.
 
+It is built around how I actually work: keyboard and mouse, hands on the mouse.
+Click, click, click through every element I want to talk about, right-click to
+seal it, then paste the lot into the coding agent on my machine in one go. One
+paste, not one per element, and no reaching for the keyboard mid-flow.
+
 ## Install
 
 1. Clone the repo.
@@ -19,17 +24,17 @@ elements I'm talking about. Much quicker.
 4. **Details** → set **Site access** to **On all sites**.
 
 Click the toolbar icon to start picking. Keep clicking to add elements —
-**right-click** or **Enter** copies the lot as one paste, **Escape** throws them
-away. No build step. Editing
-`manifest.json` needs an explicit reload — Chrome only re-reads it then, so a
-stale manifest looks exactly like a broken extension.
+**right-click** (or **Enter**) copies the lot as one paste, **Escape** throws them
+away. No build step. Editing `manifest.json` needs an explicit reload — Chrome
+only re-reads it then, so a stale manifest looks exactly like a broken extension.
 
 ## What you get
 
 Hovering draws a DevTools-style overlay: box-model rings plus a card with the tag,
 dimensions, accessibility name/role/focusability, and the capture size. Each click
-buffers an element — a pill at the bottom of the screen counts them — and Enter
-writes one clipboard item with three flavours, the target taking what it knows:
+buffers an element — a pill at the bottom of the screen counts them — and the
+right-click writes one clipboard item with three flavours, the target taking what
+it knows:
 
 | flavour | contents | who takes it |
 |---|---|---|
