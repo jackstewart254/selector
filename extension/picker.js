@@ -208,8 +208,8 @@ export function start() {
 
   let hovered = null;
   let picked = false;
-  let inflight = null; // the running pick(), so Enter can commit behind it
-  // Picks accumulate here and reach the clipboard together on Enter. Kept in the
+  let inflight = null; // the running pick(), so a commit can land behind it
+  // Picks accumulate here and reach the clipboard together on commit. Kept in the
   // page, not the worker: the worker is killed after ~30s idle and hunting for
   // the next element easily takes longer than that.
   const items = [];
@@ -375,7 +375,7 @@ export function start() {
   show();
 }
 
-/** Capture one element into `items`. Nothing reaches the clipboard until Enter. */
+/** Capture one element into `items`. Nothing reaches the clipboard until commit. */
 async function pick(el, items) {
   if (!el || el.nodeType !== 1) return;
   const r = el.getBoundingClientRect();
