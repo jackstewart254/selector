@@ -177,14 +177,20 @@ assert.equal(await picking(), true, 'picker overlay host is not in the page — 
 assert.equal(await ev(`document.documentElement.style.cursor`, pageSess), 'crosshair',
   'crosshair cursor missing — the picker did not start');
 
+const key = async (name, vk) => {
+  await send('Input.dispatchKeyEvent',
+    { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }, pageSess);
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code: name }, pageSess);
+};
+const escape = () => key('Escape', 27);
+const enter = () => key('Enter', 13);
+
 // --- the two ways out of selecting mode ------------------------------------
 // Both are easy to break without noticing: the picker still looks right, it just
 // never stops. What this CANNOT cover is picker.js taking focus at start: CDP
 // delivers the key to the page whatever has focus, so the real-world case —
 // focus parked on the toolbar button after the click — is untestable here.
-await send('Input.dispatchKeyEvent',
-  { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }, pageSess);
-await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
+await escape();
 await sleep(300);
 assert.equal(await picking(), false, 'Escape did not end selecting mode');
 // equal '', not notEqual 'crosshair' — the latter also passes when ev() returns
@@ -241,7 +247,10 @@ for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
     { type, x: box.x, y: box.y, button: 'left', clickCount: type === 'mouseMoved' ? 0 : 1 }, pageSess);
   await sleep(250);
 }
-await sleep(2500); // capture + crop + download + clipboard
+// The picker is sticky: a click only buffers, Enter is what writes the clipboard.
+await sleep(1500); // capture + crop, before the commit
+await enter();
+await sleep(2500); // compose + clipboard
 
 // Read the whole item, not just text — the flavours are the feature.
 const flavours = JSON.parse(await ev(
@@ -334,46 +343,101 @@ for (const [sw_, sh] of [[4000, 2000], [2000, 4000]]) {
     `so it gets resampled again downstream and the cap bought nothing`);
 }
 
-// --- toggling inside a pick's teardown window ------------------------------
-// A pick arms teardown on a 600ms timer. Toggle off and on again inside that
-// window and the old timer fires against the NEW picker; if teardown does not
-// check it still owns the picker, it nulls the handle and orphans that picker's
-// swallow handlers on document — every click on the page eaten, no way to stop
-// it, reload the only escape. Late, because it deliberately leaves a pick and
-// two toggles in its wake.
+// --- toggling inside a pick's in-flight window -----------------------------
+// A pick is async — component probe, capture, crop. Toggle off and on again
+// before it lands and the old picker's closures resolve against the NEW one; if
+// they do not check they still own the picker, the stale one nulls the handle
+// and re-appends its own host, orphaning the live picker's swallow handlers on
+// document — every click on the page eaten, no way to stop it, reload the only
+// escape. Late, because it deliberately leaves a pick and two toggles in its
+// wake.
 const toggle = async (why) => {
   const r = await ev(`startPicker(${tab}).then(() => 'ok').catch(e => 'FAILED: ' + e.message)`, swSess);
   assert.equal(r, 'ok', `startPicker threw while ${why}: ${r}`);
 };
-await toggle('restarting for the teardown-window check');
+await toggle('restarting for the in-flight-window check');
 await sleep(700);
 const t0 = Date.now();
 for (const type of ['mousePressed', 'mouseReleased']) {
   await send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 }, pageSess);
 }
-await toggle('stopping the picked picker inside its teardown window');
+await toggle('stopping the picked picker while its pick is in flight');
 await toggle('starting a fresh picker inside that window');
-// Both toggles have to land inside the 600ms window or the race never happens
-// and the assert below passes without proving anything. Measured at ~14ms, so
-// this is a tripwire on a 40x slowdown, not a real timing dependency.
+// Both toggles have to land before the pick resolves or the race never happens
+// and the assert below passes without proving anything. The probe alone holds it
+// open for up to 400ms; measured at ~14ms, so this is a tripwire on a 40x
+// slowdown, not a real timing dependency.
 const elapsed = Date.now() - t0;
-assert.ok(elapsed < 600,
-  `the two toggles took ${elapsed}ms, past the 600ms teardown window — this check proved nothing`);
+assert.ok(elapsed < 400,
+  `the two toggles took ${elapsed}ms, past the pick's in-flight window — this check proved nothing`);
 assert.equal(await picking(), true, 'the second toggle did not start a picker — nothing below is under test');
-await sleep(900); // let the first picker's stale timer fire
-await send('Input.dispatchKeyEvent',
-  { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 }, pageSess);
-await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' }, pageSess);
+await sleep(1500); // let the first picker's stale pick resolve
+await escape();
 await sleep(300);
 assert.equal(await picking(), false,
   'Escape stopped working after a toggle inside a pick\'s teardown window — a stale teardown '
   + 'orphaned the live picker, and its click-swallowing handlers are now unremovable');
 
-// The page must never see a selecting click. Last, so it covers both picks —
-// run before the block above and the second one goes unchecked.
+// --- two picks, one paste --------------------------------------------------
+// The whole point of the buffer: click A, click B, Enter, and get ONE clipboard
+// item carrying both blocks and a single stacked image. Re-seeds the pasteboard,
+// since the assertions above already consumed the first sentinel.
+const box2 = JSON.parse(await ev(
+  `(() => { const r = document.getElementById('noisy').getBoundingClientRect();
+     return JSON.stringify({x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2)}); })()`, pageSess));
+const SENTINEL2 = `${SENTINEL}-multi`;
+assert.equal(await ev(
+  `navigator.clipboard.writeText(${JSON.stringify(SENTINEL2)}).then(() => 'ok').catch(e => 'FAILED: ' + e.message)`,
+  pageSess), 'ok', 'could not re-seed the sentinel for the multi-pick check');
+
+await toggle('starting a picker for the multi-pick check');
+await sleep(700);
+for (const [i, target] of [box, box2].entries()) {
+  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+    await send('Input.dispatchMouseEvent',
+      { type, x: target.x, y: target.y, button: 'left', clickCount: type === 'mouseMoved' ? 0 : 1 }, pageSess);
+    await sleep(250);
+  }
+  if (i === 0) {
+    await sleep(1200); // the overlay only comes back once the capture has landed
+    assert.equal(await picking(), true,
+      'the picker did not stay up after the first pick — it is not sticky, so nothing accumulates');
+  }
+}
+// Deliberately no wait here: Enter lands while the second pick is still in
+// flight, which is how you actually finish, and which silently loses that
+// element unless the commit waits behind the pick.
+await enter();
+await sleep(3000); // two crops, composed, then the clipboard write
+assert.equal(await picking(), false, 'Enter did not end selecting mode');
+
+const multi = await ev(`navigator.clipboard.readText()`, pageSess);
+assert.notEqual(multi, SENTINEL2, 'the multi-pick wrote nothing — the clipboard still holds the sentinel');
+const blocks = (multi.match(/<launch-selected-element>/g) || []).length;
+assert.equal(blocks, 2, `expected both blocks on the clipboard, got ${blocks}`);
+assert.ok(multi.includes('data-testid="add-money"') && multi.includes('id="noisy"'),
+  'the clipboard does not carry both of the elements that were clicked');
+
+// The stacked image, checked by height: a composite that dropped a shot is
+// exactly as tall as the single crop already predicted above.
+const stackedH = JSON.parse(await ev(
+  `navigator.clipboard.read().then(async (items) => {
+     if (!items[0].types.includes('image/png')) return '0';
+     const buf = new Uint8Array(await (await items[0].getType('image/png')).arrayBuffer());
+     return String(new DataView(buf.buffer).getUint32(20));
+   })`, pageSess));
+if (stackedH) {
+  assert.ok(stackedH > expected.h,
+    `the clipboard image is ${stackedH}px tall, no taller than the ${expected.h}px single crop — `
+    + 'the second screenshot was dropped rather than stacked');
+}
+
+// The page must never see a selecting click. Last, so it covers every pick —
+// run before the blocks above and they go unchecked.
 const leaked = await ev(`window.__pageSawClick === true`, pageSess);
 assert.notEqual(leaked, true, 'the page saw the selecting click — event swallowing is broken');
 
-console.log(`PASS — clipboard carries ${JSON.stringify(flavours)}: ${clip.length} chars + ${shotNote}, click swallowed`);
+console.log(`PASS — clipboard carries ${JSON.stringify(flavours)}: ${clip.length} chars + ${shotNote}, `
+  + `click swallowed; 2 picks stacked to ${stackedH || 'no'} px`);
 cleanup();
 process.exit(0);

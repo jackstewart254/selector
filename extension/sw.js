@@ -78,6 +78,36 @@ async function crop(dataUrl, rect, dpr, url = '') {
   return 'data:image/png;base64,' + b64(await blob.arrayBuffer());
 }
 
+/**
+ * Stack finished crops into one bitmap, in pick order. The clipboard's image
+ * flavour is a single bitmap, so a multi-pick either becomes one image or loses
+ * all but one; each crop already carries its own URL strip, so the stack still
+ * reads as separate shots. The gap is drawn in the strip's own grey so a shot
+ * with a white edge does not bleed into the one below it.
+ */
+// ponytail: no cap on the stacked height — each tile is already <= MAX_SIDE and
+// the whole thing gets downscaled once more downstream, so ~4 picks stay legible
+// and 20 will not. Cap and tile into columns if that ever bites.
+async function compose(dataUrls) {
+  const bmps = await Promise.all(
+    dataUrls.map(async (u) => createImageBitmap(await (await fetch(u)).blob())));
+  const GAP = 8;
+  const w = Math.max(...bmps.map((b) => b.width));
+  const h = bmps.reduce((s, b) => s + b.height, 0) + GAP * (bmps.length - 1);
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#5f6368';
+  ctx.fillRect(0, 0, w, h);
+  let y = 0;
+  for (const b of bmps) {
+    ctx.drawImage(b, 0, y);
+    y += b.height + GAP;
+    b.close();
+  }
+  const blob = await canvas.convertToBlob({ type: 'image/png' });
+  return 'data:image/png;base64,' + b64(await blob.arrayBuffer());
+}
+
 function badge(text, color) {
   chrome.action.setBadgeBackgroundColor({ color });
   chrome.action.setBadgeText({ text });
@@ -168,7 +198,7 @@ async function startPicker(tab) {
       func: async (url) => { (await import(url)).start(); },
       args: [chrome.runtime.getURL('picker.js')],
     });
-    chrome.action.setTitle({ tabId: tab.id, title: 'Selecting — click an element, Escape cancels' });
+    chrome.action.setTitle({ tabId: tab.id, title: 'Selecting — click elements, Enter copies, Escape cancels' });
   } catch (e) {
     fail(String(e.message || e));
   }
@@ -201,6 +231,15 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       chrome.action.setTitle({ tabId: sender.tab.id, title: chrome.runtime.getManifest().action.default_title });
     }
     return false;
+  }
+  if (msg.type === 'compose') {
+    compose(msg.dataUrls).then((dataUrl) => reply({ dataUrl }), (e) => {
+      // One shot beats none: the caller keeps the first crop rather than losing
+      // the whole paste to a canvas that would not allocate.
+      console.warn('compose failed', e);
+      reply({ dataUrl: '' });
+    });
+    return true;
   }
   if (msg.type !== 'picked') return false;
   handlePick(msg, sender).then(reply, (e) => {
