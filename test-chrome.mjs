@@ -404,12 +404,19 @@ for (const [i, target] of [box, box2].entries()) {
       'the picker did not stay up after the first pick — it is not sticky, so nothing accumulates');
   }
 }
-// Deliberately no wait here: Enter lands while the second pick is still in
-// flight, which is how you actually finish, and which silently loses that
-// element unless the commit waits behind the pick.
-await enter();
+// Right-click, not Enter: the mouse-only way out, and the only path that has to
+// eat the native context menu on its way off the page. Deliberately no wait
+// first — the commit lands while the second pick is still in flight, which is
+// how you actually finish, and which silently loses that element unless the
+// commit waits behind the pick.
+for (const type of ['mousePressed', 'mouseReleased']) {
+  await send('Input.dispatchMouseEvent',
+    { type, x: box2.x, y: box2.y, button: 'right', buttons: 2, clickCount: 1 }, pageSess);
+}
 await sleep(3000); // two crops, composed, then the clipboard write
-assert.equal(await picking(), false, 'Enter did not end selecting mode');
+assert.equal(await picking(), false, 'right-click did not end selecting mode');
+assert.notEqual(await ev(`window.__pageSawMenu === true`, pageSess), true,
+  'the native context menu leaked through the committing right-click');
 
 const multi = await ev(`navigator.clipboard.readText()`, pageSess);
 assert.notEqual(multi, SENTINEL2, 'the multi-pick wrote nothing — the clipboard still holds the sentinel');

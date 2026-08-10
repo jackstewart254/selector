@@ -72,6 +72,9 @@
   // Bubble phase: the picker cancels at document capture, so a selecting click
   // must never reach this. Asserted by test-chrome.mjs.
   document.addEventListener('click', () => { window.__pageSawClick = true; });
+  // Right-click commits the buffer, and the native menu fires after the
+  // pointerdown the picker acts on — so this must never run either.
+  document.addEventListener('contextmenu', () => { window.__pageSawMenu = true; });
   document.getElementById('noisy').addEventListener('click', () => alert('page click leaked!'));
   document.getElementById('nav-link').addEventListener('click', () => console.log('page click leaked!'));
   document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); alert('submit leaked!'); });
