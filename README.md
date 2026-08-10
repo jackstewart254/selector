@@ -18,8 +18,9 @@ elements I'm talking about. Much quicker.
 3. **Load unpacked** → select `extension/`.
 4. **Details** → set **Site access** to **On all sites**.
 
-Click the toolbar icon to start picking. Keep clicking to add elements — **Enter**
-copies the lot as one paste, **Escape** throws them away. No build step. Editing
+Click the toolbar icon to start picking. Keep clicking to add elements —
+**right-click** or **Enter** copies the lot as one paste, **Escape** throws them
+away. No build step. Editing
 `manifest.json` needs an explicit reload — Chrome only re-reads it then, so a
 stale manifest looks exactly like a broken extension.
 

@@ -198,7 +198,7 @@ async function startPicker(tab) {
       func: async (url) => { (await import(url)).start(); },
       args: [chrome.runtime.getURL('picker.js')],
     });
-    chrome.action.setTitle({ tabId: tab.id, title: 'Selecting — click elements, Enter copies, Escape cancels' });
+    chrome.action.setTitle({ tabId: tab.id, title: 'Selecting — click elements, right-click or Enter copies, Escape cancels' });
   } catch (e) {
     fail(String(e.message || e));
   }

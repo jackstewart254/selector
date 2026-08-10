@@ -227,7 +227,7 @@ export function start() {
     for (const el of [shot, marginL, borderL, paddingL, contentL, card]) el.style.display = 'none';
     hovered = null;
     hud.textContent = items.length
-      ? `${items.length} selected — Enter to copy, Esc to clear`
+      ? `${items.length} selected — right-click or Enter to copy, Esc to clear`
       : 'Click elements to select — Esc to cancel';
     document.documentElement.append(host);
     document.documentElement.style.cursor = 'crosshair';
@@ -317,13 +317,37 @@ export function start() {
     });
   }
 
+  /** Copy the buffer and quit. Tear down first — finish() awaits the worker, and
+   *  the overlay must not sit on the page for that whole trip. A pick still in
+   *  flight has not pushed into `items` yet, so commit behind it: picking and
+   *  finishing straight after is the ordinary case, and losing that last element
+   *  would be silent. */
+  function commit() {
+    const pending = picked ? inflight : null;
+    teardown();
+    Promise.resolve(pending).then(() => { if (items.length) finish(items); });
+  }
+
   // The picker stays up after a pick, so the trailing mouseup/click/contextmenu
   // are swallowed by these same still-attached handlers — and only pointerdown
   // ever starts a pick, so re-arming before they arrive cannot pick twice.
   async function swallow(e) {
     e.preventDefault();
     e.stopImmediatePropagation();
-    if (picked || e.type !== 'pointerdown') return;
+    if (e.type !== 'pointerdown') return;
+    if (e.button === 2) {
+      // Right-click finishes, so the whole thing works without the keyboard.
+      // teardown() pulls the swallow handlers off document on the way out, and
+      // the native menu fires AFTER this pointerdown — so leave something behind
+      // to eat it, or committing pops a context menu every time.
+      const eat = (ev) => { ev.preventDefault(); ev.stopImmediatePropagation(); };
+      for (const t of ['contextmenu', 'auxclick']) document.addEventListener(t, eat, true);
+      setTimeout(() => {
+        for (const t of ['contextmenu', 'auxclick']) document.removeEventListener(t, eat, true);
+      }, 500);
+      return commit();
+    }
+    if (picked || e.button !== 0) return;
     picked = true;
     hide(); // out of the screenshot and out of the serialised DOM before we read it
     inflight = pick(e.composedPath()[0], items);
@@ -340,14 +364,8 @@ export function start() {
     if (e.key !== 'Escape' && e.key !== 'Enter') return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    // A pick still in flight has not pushed into `items` yet, so commit behind it
-    // — Enter right after a click is the ordinary way to finish, and dropping
-    // that last element would be silent. Tear down first either way: finish()
-    // awaits the worker, and the overlay must not sit on the page for that trip.
-    const pending = picked ? inflight : null;
-    const commit = e.key === 'Enter';
-    teardown();
-    if (commit) Promise.resolve(pending).then(() => { if (items.length) finish(items); });
+    if (e.key === 'Enter') return commit();
+    teardown(); // Escape throws the buffer away
   }
 
   for (const t of MOUSE) document.addEventListener(t, swallow, true);
