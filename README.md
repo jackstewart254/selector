@@ -18,21 +18,26 @@ elements I'm talking about. Much quicker.
 3. **Load unpacked** → select `extension/`.
 4. **Details** → set **Site access** to **On all sites**.
 
-Click the toolbar icon to start picking. Escape cancels. No build step. Editing
+Click the toolbar icon to start picking. Keep clicking to add elements — **Enter**
+copies the lot as one paste, **Escape** throws them away. No build step. Editing
 `manifest.json` needs an explicit reload — Chrome only re-reads it then, so a
 stale manifest looks exactly like a broken extension.
 
 ## What you get
 
 Hovering draws a DevTools-style overlay: box-model rings plus a card with the tag,
-dimensions, accessibility name/role/focusability, and the capture size. Clicking
-copies one clipboard item with three flavours — the target takes what it knows:
+dimensions, accessibility name/role/focusability, and the capture size. Each click
+buffers an element — a pill at the bottom of the screen counts them — and Enter
+writes one clipboard item with three flavours, the target taking what it knows:
 
 | flavour | contents | who takes it |
 |---|---|---|
-| `text/plain` | the element block | terminals, editors |
-| `text/html` | the block **and** the image inline | rich editors, web chats |
-| `image/png` | the cropped screenshot, page URL burned along the bottom | image-aware apps |
+| `text/plain` | every element block, in click order | terminals, editors |
+| `text/html` | the blocks **and** each image inline | rich editors, web chats |
+| `image/png` | the crops stacked into one, each with its page URL burned along the bottom | image-aware apps |
+
+A clipboard item carries one bitmap, which is why several picks stack into a
+single image rather than travelling separately.
 
 ```
 <launch-selected-element>

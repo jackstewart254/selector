@@ -195,42 +195,66 @@ export function start() {
     + 'font:12px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#202124;background:#fff;'
     + 'border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.35);padding:8px 10px;'
     + 'min-width:200px;max-width:360px;z-index:1';
-  root.append(shot, marginL, borderL, paddingL, contentL, card);
-  document.documentElement.append(host);
+  // The buffer's only readout: how many picks are held and which key commits
+  // them. Inside the overlay host, so hide() takes it out of the screenshot
+  // along with everything else.
+  const hud = document.createElement('div');
+  hud.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);'
+    + 'font:12px/1.5 ui-sans-serif,system-ui,sans-serif;color:#fff;background:rgba(32,33,36,.92);'
+    + 'padding:6px 12px;border-radius:999px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.3);z-index:2';
+  root.append(shot, marginL, borderL, paddingL, contentL, card, hud);
 
   const prevCursor = document.documentElement.style.cursor;
-  document.documentElement.style.cursor = 'crosshair';
-
-  // Clicking the toolbar icon leaves focus in the browser chrome, so the page
-  // document receives no keydown and Escape does nothing until you click into
-  // the page. Take focus onto the overlay host to route the keys here.
-  //
-  // hasFocus(), not activeElement: Blink KEEPS activeElement when the web
-  // contents loses focus — measured on Chrome 151, a focused <input> is still
-  // activeElement after focus moves away — so gating on it means never firing
-  // for anyone who had a field focused, which is most of the reason to reach for
-  // the picker. And this is the exact condition: onKey listens at document
-  // capture, so any focused page element already delivers Escape. The steal is
-  // only ever needed when the document has no focus at all.
-  if (!document.hasFocus()) {
-    host.tabIndex = -1;
-    host.focus({ preventScroll: true });
-  }
 
   let hovered = null;
   let picked = false;
+  let inflight = null; // the running pick(), so Enter can commit behind it
+  // Picks accumulate here and reach the clipboard together on Enter. Kept in the
+  // page, not the worker: the worker is killed after ~30s idle and hunting for
+  // the next element easily takes longer than that.
+  const items = [];
 
   function hide() {
     host.remove();
     document.documentElement.style.cursor = prevCursor;
   }
 
+  /** (Re)arm the overlay — once at the start, then after every pick, since the
+   *  screenshot needs the whole host out of the page. */
+  function show() {
+    // Clear the last element's boxes rather than flashing them over whatever
+    // happens to be under the cursor now.
+    for (const el of [shot, marginL, borderL, paddingL, contentL, card]) el.style.display = 'none';
+    hovered = null;
+    hud.textContent = items.length
+      ? `${items.length} selected — Enter to copy, Esc to clear`
+      : 'Click elements to select — Esc to cancel';
+    document.documentElement.append(host);
+    document.documentElement.style.cursor = 'crosshair';
+
+    // Clicking the toolbar icon leaves focus in the browser chrome, so the page
+    // document receives no keydown and Escape does nothing until you click into
+    // the page. Take focus onto the overlay host to route the keys here.
+    //
+    // hasFocus(), not activeElement: Blink KEEPS activeElement when the web
+    // contents loses focus — measured on Chrome 151, a focused <input> is still
+    // activeElement after focus moves away — so gating on it means never firing
+    // for anyone who had a field focused, which is most of the reason to reach for
+    // the picker. And this is the exact condition: onKey listens at document
+    // capture, so any focused page element already delivers Escape. The steal is
+    // only ever needed when the document has no focus at all.
+    if (!document.hasFocus()) {
+      host.tabIndex = -1;
+      host.focus({ preventScroll: true });
+    }
+  }
+
   function teardown() {
-    // Identity, not truthiness. A pick arms this on a 600ms timer; stop the
-    // picker and start a fresh one inside that window and the old timer would
-    // otherwise tear the NEW picker's state down, orphaning its swallow handlers
-    // on document with no way left to remove them — a page dead to the mouse
-    // until reload.
+    // Identity, not truthiness. Stop the picker and start a fresh one and this
+    // closure is still reachable from the old one's in-flight work; without the
+    // guard it would tear the NEW picker's state down, orphaning its swallow
+    // handlers on document with no way left to remove them — a page dead to the
+    // mouse until reload.
     if (stop !== teardown) return;
     stop = null;
     for (const t of MOUSE) document.removeEventListener(t, swallow, true);
@@ -238,7 +262,7 @@ export function start() {
     document.removeEventListener('keydown', onKey, true);
     hide();
     // The worker owns the toolbar tooltip and cannot see this happen. Without
-    // it the icon keeps saying "Escape cancels" at a picker that already quit.
+    // it the icon keeps offering Enter and Escape at a picker that already quit.
     chrome.runtime.sendMessage({ type: 'idle' }).catch(() => {});
   }
 
@@ -293,31 +317,48 @@ export function start() {
     });
   }
 
-  function swallow(e) {
+  // The picker stays up after a pick, so the trailing mouseup/click/contextmenu
+  // are swallowed by these same still-attached handlers — and only pointerdown
+  // ever starts a pick, so re-arming before they arrive cannot pick twice.
+  async function swallow(e) {
     e.preventDefault();
     e.stopImmediatePropagation();
     if (picked || e.type !== 'pointerdown') return;
     picked = true;
     hide(); // out of the screenshot and out of the serialised DOM before we read it
-    // Keep swallowing until the trailing mouseup/click/contextmenu have passed.
-    setTimeout(teardown, 600);
-    pick(e.composedPath()[0]);
+    inflight = pick(e.composedPath()[0], items);
+    await inflight;
+    // The picker can be stopped and restarted while that is in flight. Showing
+    // here would re-append a host this picker no longer owns, and nothing left
+    // running could ever take it back off the page.
+    if (stop !== teardown) return;
+    picked = false;
+    show();
   }
 
   function onKey(e) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' && e.key !== 'Enter') return;
     e.preventDefault();
     e.stopImmediatePropagation();
+    // A pick still in flight has not pushed into `items` yet, so commit behind it
+    // — Enter right after a click is the ordinary way to finish, and dropping
+    // that last element would be silent. Tear down first either way: finish()
+    // awaits the worker, and the overlay must not sit on the page for that trip.
+    const pending = picked ? inflight : null;
+    const commit = e.key === 'Enter';
     teardown();
+    if (commit) Promise.resolve(pending).then(() => { if (items.length) finish(items); });
   }
 
   for (const t of MOUSE) document.addEventListener(t, swallow, true);
   document.addEventListener('pointermove', hover, true);
   document.addEventListener('keydown', onKey, true);
   stop = teardown;
+  show();
 }
 
-async function pick(el) {
+/** Capture one element into `items`. Nothing reaches the clipboard until Enter. */
+async function pick(el, items) {
   if (!el || el.nodeType !== 1) return;
   const r = el.getBoundingClientRect();
   const payload = buildPayload(el, { react: await reactComponent(el) });
@@ -332,11 +373,38 @@ async function pick(el) {
   } catch (e) {
     res = { text: payload, error: String(e.message || e) };
   }
-  const text = (res && res.text) || payload;
-  const how = await copy(text, res && res.dataUrl);
+  items.push({ text: (res && res.text) || payload, dataUrl: (res && res.dataUrl) || '' });
+}
+
+/**
+ * Commit the buffer as ONE paste. A clipboard item carries a single bitmap, so
+ * several shots have to become one — the worker stacks them in pick order, and
+ * the text blocks follow in that same order so the two can be read side by side.
+ * (text/html still gets them as separate <img>s, which is strictly better where
+ * the target understands it.)
+ */
+async function finish(items) {
+  const shots = items.map((i) => i.dataUrl).filter(Boolean);
+  const text = items.length === 1
+    ? items[0].text
+    : `${items.length} elements were selected, in the order they appear top-to-bottom in the image.\n\n`
+      + items.map((i) => i.text).join('\n\n');
+
+  let composite = shots[0] || '';
+  if (shots.length > 1) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'compose', dataUrls: shots });
+      if (res && res.dataUrl) composite = res.dataUrl;
+    } catch (e) {
+      console.warn('[selector] compose failed, falling back to the first shot', e);
+    }
+  }
+
+  const how = await copy(text, composite, shots);
+  const n = items.length > 1 ? `${items.length} ` : '';
   toast({
-    both: 'Copied — image + text',
-    text: 'Copied — text only',
+    both: `Copied ${n}— image + text`,
+    text: `Copied ${n}— text only`,
     fail: 'Copy failed — see console',
   }[how], how !== 'fail');
   if (how === 'fail') console.warn('[selector] clipboard write failed; payload follows\n' + text);
@@ -357,11 +425,14 @@ async function pick(el) {
  *
  * Returns 'both' | 'text' | 'fail'.
  */
-async function copy(text, dataUrl) {
+async function copy(text, dataUrl, shots = dataUrl ? [dataUrl] : []) {
   if (dataUrl && typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
     try {
       const png = await (await fetch(dataUrl)).blob();
-      const html = `<div><img src="${dataUrl}" alt="selected element"><pre>${escapeHtml(text)}</pre></div>`;
+      // The stack for image/png, but the individual shots for text/html — one
+      // <img> each keeps them at full size for anything that takes rich paste.
+      const imgs = shots.map((u) => `<img src="${u}" alt="selected element">`).join('');
+      const html = `<div>${imgs}<pre>${escapeHtml(text)}</pre></div>`;
       await navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob([text], { type: 'text/plain' }),
         'text/html': new Blob([html], { type: 'text/html' }),
